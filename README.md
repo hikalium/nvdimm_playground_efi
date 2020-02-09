@@ -1,0 +1,2 @@
+# nvdimm_playground_efi
+NVDIMMをUEFIアプリケーションから触ってみるサンプル
