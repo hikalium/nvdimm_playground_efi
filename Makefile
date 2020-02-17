@@ -26,3 +26,6 @@ run : mnt/EFI/BOOT/BOOTX64.EFI
 		-drive format=raw,file=fat:rw:mnt -net none \
 		-object memory-backend-file,id=mem1,share=on,mem-path=pmem.img,size=2G \
 		-device nvdimm,id=nvdimm1,memdev=mem1
+
+clean:
+	-rm $(DST_DIR)/BOOTX64.EFI
