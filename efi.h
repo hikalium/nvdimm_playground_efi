@@ -1,11 +1,12 @@
 #include <stdint.h>
 
+#include "guid.h"
+
 typedef void *Handle;
 typedef uint64_t UINTN;
 
 class RuntimeServices;
 class BootServices;
-class ConfigurationTable;
 class SimpleTextInputProtocol;
 
 struct TableHeader {
@@ -29,6 +30,11 @@ struct SimpleTextOutputProtocol {
   uint64_t (*set_attribute)(SimpleTextOutputProtocol *,
                             uint64_t Attribute);
   uint64_t (*clear_screen)(SimpleTextOutputProtocol *);
+};
+
+struct ConfigurationTable {
+  GUID vendor_guid;
+  void* vendor_table;
 };
 
 struct SystemTable {

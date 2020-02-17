@@ -4,7 +4,7 @@ QEMU=qemu-system-x86_64
 
 DST_DIR=mnt/EFI/BOOT
 
-$(DST_DIR)/BOOTX64.EFI : main.cc asm.S
+$(DST_DIR)/BOOTX64.EFI : main.cc asm.S efi.h guid.h
 	mkdir -p $(DST_DIR)
 	$(CLANGXX) \
 		-target x86_64-pc-win32-coff \
