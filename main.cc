@@ -77,11 +77,11 @@ packed_struct NFIT {
     uint32_t reserved;
     uint32_t proximity_domain;
     uint64_t address_range_type_guid[2];
-    uint64_t system_physical_address_range_base;
-    uint64_t system_physical_address_range_length;
+    uint64_t spa_base;
+    uint64_t spa_length;
     uint64_t address_range_memory_mapping_attribute;
 
-    static constexpr GUID kByteAdressablePersistentMemory = {
+    static constexpr GUID kByteAddressablePersistentMemory = {
         0x66F0D379,
         0xB4F3,
         0x4074,
@@ -176,8 +176,8 @@ char EFIGetChar() {
   while (true) {
     uint64_t status = efi_system_table->con_in->read_key_stroke(
         efi_system_table->con_in, &key);
-    if(status == 0) break;
-    asm volatile ("pause");
+    if (status == 0) break;
+    asm volatile("pause");
   }
   return key.unicode_char;
 }
@@ -231,6 +231,10 @@ void PrintStringAndHex64(const char *s, const void *data) {
   PrintStringAndHex64(s, reinterpret_cast<uint64_t>(data));
 }
 
+void PrintStringAndHex64(const char *s, const volatile void *data) {
+  PrintStringAndHex64(s, reinterpret_cast<uint64_t>(data));
+}
+
 static const GUID kACPITableGUID = {
     0x8868e871,
     0xe4f1,
@@ -249,6 +253,15 @@ int strncmp(const char *s1, const char *s2, size_t n) {
   while (n) {
     if (*s1 != *s2) return *s1 - *s2;
     n--;
+    s1++;
+    s2++;
+  }
+  return 0;
+}
+
+int strcmp(const char *s1, const char *s2) {
+  while (*s1 || *s2) {
+    if (*s1 != *s2) return *s1 - *s2;
     s1++;
     s2++;
   }
@@ -294,7 +307,7 @@ void PutGUID(const GUID *guid) {
 static void ShowNFIT_PrintMemoryTypeGUID(NFIT::SPARange *spa) {
   GUID *type_guid = reinterpret_cast<GUID *>(&spa->address_range_type_guid);
   PrintString("  type:");
-  if (IsEqualGUID(type_guid, &NFIT::SPARange::kByteAdressablePersistentMemory))
+  if (IsEqualGUID(type_guid, &NFIT::SPARange::kByteAddressablePersistentMemory))
     PrintString(" ByteAddressablePersistentMemory");
   else if (IsEqualGUID(type_guid, &NFIT::SPARange::kNVDIMMControlRegion))
     PrintString(" NVDIMMControlRegion");
@@ -311,10 +324,8 @@ void PrintNFIT(NFIT &nfit) {
       case NFIT::Entry::kTypeSPARangeStructure: {
         NFIT::SPARange *spa_range = reinterpret_cast<NFIT::SPARange *>(&it);
         PrintStringAndHex64("SPARange #", spa_range->spa_range_structure_index);
-        PrintStringAndHex64("  Base",
-                            spa_range->system_physical_address_range_base);
-        PrintStringAndHex64("  Length",
-                            spa_range->system_physical_address_range_length);
+        PrintStringAndHex64("  Base", spa_range->spa_base);
+        PrintStringAndHex64("  Length", spa_range->spa_length);
         ShowNFIT_PrintMemoryMappingAttr(
             spa_range->address_range_memory_mapping_attribute);
         ShowNFIT_PrintMemoryTypeGUID(spa_range);
@@ -435,25 +446,89 @@ NFIT &LookupNFIT(SystemTable *system_table) {
   return *nfit;
 }
 
+void PrintSPARange(NFIT::SPARange &spa_range) {
+  PrintStringAndHex64("SPARange #", spa_range.spa_range_structure_index);
+  PrintStringAndHex64("  Base", spa_range.spa_base);
+  PrintStringAndHex64("  Length", spa_range.spa_length);
+}
+
 void PrintNFITEntries(NFIT &nfit) {
   for (auto &it : nfit) {
     if (it.type != NFIT::Entry::kTypeSPARangeStructure) {
-      PrintStringAndHex64("type", it.type);
       continue;
     }
-    NFIT::SPARange *spa_range = reinterpret_cast<NFIT::SPARange *>(&it);
+    NFIT::SPARange &spa_range = *reinterpret_cast<NFIT::SPARange *>(&it);
     if (IsEqualGUID(
-            reinterpret_cast<GUID *>(&spa_range->address_range_type_guid),
-            &NFIT::SPARange::kByteAdressablePersistentMemory)) {
-      PrintStringAndHex64("SPARange #", spa_range->spa_range_structure_index);
-      PrintStringAndHex64("  Base",
-                          spa_range->system_physical_address_range_base);
-      PrintStringAndHex64("  Length",
-                          spa_range->system_physical_address_range_length);
+            reinterpret_cast<GUID *>(&spa_range.address_range_type_guid),
+            &NFIT::SPARange::kByteAddressablePersistentMemory)) {
+      PrintSPARange(spa_range);
       continue;
     }
-    continue;
   }
+}
+
+NFIT::SPARange *GetFirstSPARangeOfByteAddressablePMEM(NFIT &nfit) {
+  for (auto &it : nfit) {
+    if (it.type != NFIT::Entry::kTypeSPARangeStructure) {
+      continue;
+    }
+    NFIT::SPARange &spa_range = *reinterpret_cast<NFIT::SPARange *>(&it);
+    if (IsEqualGUID(
+            reinterpret_cast<GUID *>(&spa_range.address_range_type_guid),
+            &NFIT::SPARange::kByteAddressablePersistentMemory)) {
+      return &spa_range;
+    }
+  }
+  return nullptr;
+}
+
+static inline void DoCLWB(volatile void *__p)
+{
+    asm volatile("clwb %0" : "+m"(*(volatile char*)__p));
+}
+
+void RunCommand(const char *input, NFIT &nfit) {
+  if (strcmp(input, "write1") == 0) {
+    NFIT::SPARange &spa_range = *GetFirstSPARangeOfByteAddressablePMEM(nfit);
+    PrintString("First spa range:\n");
+    PrintSPARange(spa_range);
+    volatile uint64_t *p =
+        reinterpret_cast<volatile uint64_t *>(spa_range.spa_base);
+    PrintStringAndHex64("Read value before write", *p);
+    PrintStringAndHex64("Write 1 at", p);
+    *p = 1;
+    PrintStringAndHex64("Read value after write ", *p);
+    return;
+  }
+  if (strcmp(input, "write0") == 0) {
+    NFIT::SPARange &spa_range = *GetFirstSPARangeOfByteAddressablePMEM(nfit);
+    PrintString("First spa range:\n");
+    PrintSPARange(spa_range);
+    volatile uint64_t *p =
+        reinterpret_cast<volatile uint64_t *>(spa_range.spa_base);
+    PrintStringAndHex64("Read value before write", *p);
+    PrintStringAndHex64("Write 0 at", p);
+    *p = 0;
+    PrintStringAndHex64("Read value after write ", *p);
+    return;
+  }
+  if (strcmp(input, "clwb") == 0) {
+    NFIT::SPARange &spa_range = *GetFirstSPARangeOfByteAddressablePMEM(nfit);
+    PrintString("First spa range:\n");
+    PrintSPARange(spa_range);
+    volatile uint64_t *p =
+        reinterpret_cast<volatile uint64_t *>(spa_range.spa_base);
+    PrintStringAndHex64("Read value before write", *p);
+    PrintStringAndHex64("CLWB on", p);
+    DoCLWB(p);
+    PrintStringAndHex64("Read value after write ", *p);
+    return;
+  }
+  if (strcmp(input, "show spa") == 0) {
+    PrintNFITEntries(nfit);
+    return;
+  }
+  PrintString("Available commands:\n");
 }
 
 void efi_main(Handle image_handle, SystemTable *system_table) {
@@ -467,22 +542,22 @@ void efi_main(Handle image_handle, SystemTable *system_table) {
   constexpr int kKeyBufLen = 16;
   char cmd[kKeyBufLen];
   int cmd_idx = 0;
-  for (char c = '\r'; ; c = EFIGetChar()) {
-    if(c == '\r') {
+  for (char c = '\r';; c = EFIGetChar()) {
+    if (c == '\r') {
       cmd[cmd_idx] = 0;
       PrintString("\n");
-      PrintString(cmd);
-      PrintString("\n> ");
+      if (*cmd) RunCommand(cmd, nfit);
+      PrintString("> ");
       cmd_idx = 0;
       continue;
     }
-    if(c == '\b') {
-      if(cmd_idx == 0) continue;
+    if (c == '\b') {
+      if (cmd_idx == 0) continue;
       EFIPutChar(c);
       cmd_idx--;
       continue;
     }
-    if(cmd_idx == kKeyBufLen - 1) continue;
+    if (cmd_idx == kKeyBufLen - 1) continue;
     EFIPutChar(c);
     cmd[cmd_idx] = c;
     cmd_idx++;
