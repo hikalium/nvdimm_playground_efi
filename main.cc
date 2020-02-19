@@ -171,6 +171,17 @@ void EFIPutChar(wchar_t c) {
   efi_system_table->con_out->output_string(efi_system_table->con_out, buf);
 }
 
+char EFIGetChar() {
+  InputKey key;
+  while (true) {
+    uint64_t status = efi_system_table->con_in->read_key_stroke(
+        efi_system_table->con_in, &key);
+    if(status == 0) break;
+    asm volatile ("pause");
+  }
+  return key.unicode_char;
+}
+
 void PrintChar(char c) {
   if (c == '\n') {
     EFIPutChar('\r');
@@ -453,6 +464,27 @@ void efi_main(Handle image_handle, SystemTable *system_table) {
   NFIT &nfit = LookupNFIT(system_table);
   PrintNFIT(nfit);
 
-  for (;;) {
+  constexpr int kKeyBufLen = 16;
+  char cmd[kKeyBufLen];
+  int cmd_idx = 0;
+  for (char c = '\r'; ; c = EFIGetChar()) {
+    if(c == '\r') {
+      cmd[cmd_idx] = 0;
+      PrintString("\n");
+      PrintString(cmd);
+      PrintString("\n> ");
+      cmd_idx = 0;
+      continue;
+    }
+    if(c == '\b') {
+      if(cmd_idx == 0) continue;
+      EFIPutChar(c);
+      cmd_idx--;
+      continue;
+    }
+    if(cmd_idx == kKeyBufLen - 1) continue;
+    EFIPutChar(c);
+    cmd[cmd_idx] = c;
+    cmd_idx++;
   };
 };
