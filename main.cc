@@ -2,7 +2,9 @@
 
 #include <stddef.h>
 
+#include "assert.h"
 #include "efi.h"
+#include "efi_stdio.h"
 #include "guid.h"
 
 struct XSDT;
@@ -164,91 +166,6 @@ packed_struct NFIT {
 };
 static_assert(offsetof(NFIT, entry) == 40);
 
-void EFIPutChar(wchar_t c) {
-  wchar_t buf[2];
-  buf[0] = c;
-  buf[1] = 0;
-  efi_system_table->con_out->output_string(efi_system_table->con_out, buf);
-}
-
-char EFIGetChar() {
-  InputKey key;
-  while (true) {
-    uint64_t status = efi_system_table->con_in->read_key_stroke(
-        efi_system_table->con_in, &key);
-    if (status == 0) break;
-    asm volatile("pause");
-  }
-  return key.unicode_char;
-}
-
-void PrintChar(char c) {
-  if (c == '\n') {
-    EFIPutChar('\r');
-    EFIPutChar('\n');
-    return;
-  }
-  EFIPutChar(c);
-}
-
-void PrintString(const char *s) {
-  while (*s) {
-    PrintChar(*s);
-    s++;
-  }
-}
-
-void PrintStringWithSize(const char *s, int n) {
-  for (int i = 0; i < n; i++) {
-    PrintChar(s[i]);
-  }
-}
-
-char NibbleToHexChar(uint8_t nibble) {
-  if (nibble < 10) return nibble + '0';
-  return nibble - 10 + 'A';
-}
-
-void PrintU8AsHex(uint8_t data) {
-  EFIPutChar(NibbleToHexChar(data >> 4));
-  EFIPutChar(NibbleToHexChar(data & 0xF));
-}
-
-void PrintU64AsHex(uint64_t data) {
-  for (int i = 7; i >= 0; i--) {
-    PrintU8AsHex(data >> (i * 8));
-  }
-}
-
-void PrintStringAndHex64(const char *s, uint64_t data) {
-  PrintString(s);
-  PrintString(": 0x");
-  PrintU64AsHex(data);
-  PrintString("\n");
-}
-
-void PrintStringAndHex64(const char *s, const void *data) {
-  PrintStringAndHex64(s, reinterpret_cast<uint64_t>(data));
-}
-
-void PrintStringAndHex64(const char *s, const volatile void *data) {
-  PrintStringAndHex64(s, reinterpret_cast<uint64_t>(data));
-}
-
-static const GUID kACPITableGUID = {
-    0x8868e871,
-    0xe4f1,
-    0x11d3,
-    {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}};
-
-extern "C" uint8_t ReadIOPort8(uint16_t);
-
-[[noreturn]] static void Die(void) {
-  PrintString("\nHalted...\n");
-  for (;;) {
-  }
-}
-
 int strncmp(const char *s1, const char *s2, size_t n) {
   while (n) {
     if (*s1 != *s2) return *s1 - *s2;
@@ -405,39 +322,40 @@ void PrintNFIT(NFIT &nfit) {
   PrintString("NFIT end\n");
 }
 
-NFIT &LookupNFIT(SystemTable *system_table) {
-  RSDPStructure *rsdp = nullptr;
+static const GUID kACPITableGUID = {
+    0x8868e871,
+    0xe4f1,
+    0x11d3,
+    {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}};
 
+RSDPStructure &LookupRSDP(SystemTable *system_table) {
   PrintStringAndHex64("# of table entries",
                       system_table->number_of_table_entries);
+  ConfigurationTable *config_table = system_table->configuration_table;
   for (uint64_t i = 0; i < system_table->number_of_table_entries; i++) {
-    if (IsEqualGUID(&kACPITableGUID,
-                    &system_table->configuration_table[i].vendor_guid)) {
-      PrintStringAndHex64("ACPI Table Found at index", i);
-      rsdp = reinterpret_cast<RSDPStructure *>(
-          system_table->configuration_table[i].vendor_table);
-    }
+    if (!IsEqualGUID(&kACPITableGUID, &config_table[i].vendor_guid)) continue;
+    PrintStringAndHex64("ACPI Table Found at index", i);
+    return *reinterpret_cast<RSDPStructure *>(config_table[i].vendor_table);
   }
-  if (!rsdp) {
-    PrintString("RSDP not found!\n");
-    Die();
-  }
-  PrintStringAndHex64("RSDPStructure is at", rsdp);
+  assert(false);
+}
+
+NFIT &LookupNFIT(SystemTable *system_table) {
+  RSDPStructure &rsdp = LookupRSDP(system_table);
+
+  PrintStringAndHex64("RSDPStructure is at", &rsdp);
   PrintString("  RSDPStructure Signature: ");
-  PrintStringWithSize(rsdp->signature, 8);
+  PrintStringWithSize(rsdp.signature, 8);
   PrintChar('\n');
 
-  XSDT *xsdt = rsdp->xsdt_address;
+  XSDT *xsdt = rsdp.xsdt_address;
   PrintStringAndHex64("XSDT is at", xsdt);
   PrintString("  XSDT Signature: ");
   PrintStringWithSize(xsdt->signature, 4);
   PrintChar('\n');
 
   NFIT *nfit = LookupNFITFromXSDT(xsdt);
-  if (!nfit) {
-    PrintString("NFIT not found!\n");
-    Die();
-  }
+  assert(nfit);
   PrintStringAndHex64("NFIT is at", nfit);
   PrintString("  NFIT Signature: ");
   PrintStringWithSize(nfit->signature, 4);
@@ -482,9 +400,8 @@ NFIT::SPARange *GetFirstSPARangeOfByteAddressablePMEM(NFIT &nfit) {
   return nullptr;
 }
 
-static inline void DoCLWB(volatile void *__p)
-{
-    asm volatile("clwb %0" : "+m"(*(volatile char*)__p));
+static inline void DoCLWB(volatile void *__p) {
+  asm volatile("clwb %0" : "+m"(*(volatile char *)__p));
 }
 
 void RunCommand(const char *input, NFIT &nfit) {
@@ -531,6 +448,7 @@ void RunCommand(const char *input, NFIT &nfit) {
   PrintString("Available commands:\n");
 }
 
+SystemTable *efi_system_table;
 void efi_main(Handle image_handle, SystemTable *system_table) {
   efi_system_table = system_table;
 

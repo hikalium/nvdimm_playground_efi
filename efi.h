@@ -1,3 +1,5 @@
+#pragma once
+
 #include <stdint.h>
 
 #include "guid.h"
@@ -64,5 +66,5 @@ struct SystemTable {
   ConfigurationTable *configuration_table;
 };
 
-SystemTable *efi_system_table;
+extern SystemTable *efi_system_table; // @main.cc
 

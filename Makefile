@@ -11,19 +11,21 @@ QEMU_ARGS= \
 		-device nvdimm,id=nvdimm1,memdev=mem1
 
 DST_DIR=mnt/EFI/BOOT
+SRCS=main.cc assert.cc efi_stdio.cc
+OBJS= $(addsuffix .o, $(basename $(SRCS)))
 
-$(DST_DIR)/BOOTX64.EFI : main.cc asm.S efi.h guid.h
+$(DST_DIR)/BOOTX64.EFI : $(SRCS) efi.h guid.h
 	mkdir -p $(DST_DIR)
 	$(CLANGXX) \
 		-target x86_64-pc-win32-coff \
 		-fno-stack-protector -fshort-wchar \
 		-mno-red-zone \
 		-nostdlibinc \
-		-Wall -std=c++17 -c \
-		main.cc asm.S
+		-Wall -Wpedantic -std=c++17 -O3 -c \
+		$(SRCS)
 	$(LLD_LINK) \
 		-subsystem:efi_application -nodefaultlib \
-		-entry:efi_main main.o asm.o -out:$@
+		-entry:efi_main $(OBJS) -out:$@
 
 .FORCE :
 
