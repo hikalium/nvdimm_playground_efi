@@ -6,6 +6,7 @@
 #include "efi.h"
 #include "efi_stdio.h"
 #include "guid.h"
+#include "nfit.h"
 
 struct XSDT;
 
@@ -34,138 +35,6 @@ struct __attribute__((__packed__)) XSDT {
   void *entry[1];
 };
 
-packed_struct NFIT {
-  // 5.2.25 NVDIMM Firmware Interface Table (NFIT)
-  // Table 5-131 NFIT Structure Types
-  packed_struct Entry {
-    static const uint16_t kTypeSPARangeStructure = 0x00;
-    static const uint16_t kTypeNVDIMMRegionMappingStructure = 0x01;
-    static const uint16_t kTypeInterleaveStructure = 0x02;
-    static const uint16_t kTypeNVDIMMControlRegionStructure = 0x04;
-    static const uint16_t kTypeFlushHintAddressStructure = 0x06;
-    static const uint16_t kTypePlatformCapabilitiesStructure = 0x07;
-
-    uint16_t type;
-    uint16_t length;
-  };
-
-  class Iterator {
-   public:
-    Iterator(Entry *e) : current_(e){};
-    void operator++() {
-      current_ = reinterpret_cast<Entry *>(
-          reinterpret_cast<uint64_t>(current_) + current_->length);
-    }
-    Entry &operator*() { return *current_; }
-    friend bool operator!=(const Iterator &lhs, const Iterator &rhs) {
-      return lhs.current_ != rhs.current_;
-    }
-
-   private:
-    Entry *current_;
-  };
-  Iterator begin() { return Iterator(entry); }
-  Iterator end() {
-    return Iterator(
-        reinterpret_cast<Entry *>(reinterpret_cast<uint64_t>(this) + length));
-  }
-
-  packed_struct SPARange {
-    // System Physical Address Range
-    uint16_t type;
-    uint16_t length;
-    uint16_t spa_range_structure_index;
-    uint16_t flags;
-    uint32_t reserved;
-    uint32_t proximity_domain;
-    uint64_t address_range_type_guid[2];
-    uint64_t spa_base;
-    uint64_t spa_length;
-    uint64_t address_range_memory_mapping_attribute;
-
-    static constexpr GUID kByteAddressablePersistentMemory = {
-        0x66F0D379,
-        0xB4F3,
-        0x4074,
-        {0xAC, 0x43, 0x0D, 0x33, 0x18, 0xB7, 0x8C, 0xDB}};
-
-    static constexpr GUID kNVDIMMControlRegion = {
-        0x92F701F6,
-        0x13B4,
-        0x405D,
-        {0x91, 0x0B, 0x29, 0x93, 0x67, 0xE8, 0x23, 0x4C}};
-  };
-
-  packed_struct RegionMapping {
-    uint16_t type;
-    uint16_t length;
-    uint32_t nfit_device_handle;
-    uint16_t nvdimm_physical_id;
-    uint16_t nvdimm_region_id;
-    uint16_t spa_range_structure_index;
-    uint16_t nvdimm_control_region_struct_index;
-    uint64_t nvdimm_region_size;
-    uint64_t region_offset;
-    uint64_t nvdimm_physical_address_region_base;
-    uint16_t interleave_structure_index;
-    uint16_t interleave_ways;
-    uint16_t nvdimm_state_flags;
-    uint16_t reserved;
-  };
-  static_assert(sizeof(RegionMapping) == 48);
-
-  packed_struct InterleaveStructure {
-    uint16_t type;
-    uint16_t length;
-    uint16_t interleave_struct_index;
-    uint16_t reserved;
-    uint32_t num_of_lines_described;
-    uint32_t line_size;
-    uint32_t line_offsets[1];
-  };
-  static_assert(offsetof(InterleaveStructure, line_offsets) == 16);
-
-  packed_struct FlushHintAddressStructure {
-    uint16_t type;
-    uint16_t length;
-    uint32_t nfit_device_handle;
-    uint16_t num_of_flush_hint_addresses;
-    uint16_t reserved[3];
-    uint64_t flush_hint_addresses[1];
-  };
-  static_assert(offsetof(FlushHintAddressStructure, flush_hint_addresses) ==
-                16);
-
-  packed_struct PlatformCapabilities {
-    uint16_t type;
-    uint16_t length;
-    uint8_t highest_valid_cap_bit;
-    uint8_t reserved0[3];
-    uint32_t capabilities;
-    uint32_t reserved1;
-  };
-  static_assert(sizeof(PlatformCapabilities) == 16);
-
-  packed_struct ControlRegionStruct {
-    uint16_t type;
-    uint16_t length;
-    uint16_t nvdimm_control_region_struct_index;
-  };
-
-  char signature[4];
-  uint32_t length;
-  uint8_t revision;
-  uint8_t checksum;
-  uint8_t oem_id[6];
-  uint64_t oem_table_id;
-  uint32_t oem_revision;
-  uint32_t creator_id;
-  uint32_t creator_revision;
-  uint32_t reserved;
-  Entry entry[1];
-};
-static_assert(offsetof(NFIT, entry) == 40);
-
 int strncmp(const char *s1, const char *s2, size_t n) {
   while (n) {
     if (*s1 != *s2) return *s1 - *s2;
@@ -185,16 +54,17 @@ int strcmp(const char *s1, const char *s2) {
   return 0;
 }
 
-NFIT *LookupNFITFromXSDT(XSDT *xsdt) {
-  const int kNumOfXSDTEntries = (xsdt->length - offsetof(XSDT, entry)) >> 3;
+NFIT &LookupNFITFromXSDT(XSDT *xsdt) {
+  const int kNumOfXSDTEntries =
+      (xsdt->length - offsetof(XSDT, entry)) / sizeof(xsdt->entry[0]);
   PrintStringAndHex64("# of XSDT entries", kNumOfXSDTEntries);
   for (int i = 0; i < kNumOfXSDTEntries; i++) {
     const char *signature = static_cast<const char *>(xsdt->entry[i]);
     if (strncmp(signature, "NFIT", 4) == 0) {
-      return static_cast<NFIT *>(xsdt->entry[i]);
+      return *static_cast<NFIT *>(xsdt->entry[i]);
     }
   }
-  return nullptr;
+  assert(false);
 }
 
 static void ShowNFIT_PrintMemoryMappingAttr(uint64_t attr) {
@@ -349,19 +219,19 @@ NFIT &LookupNFIT(SystemTable *system_table) {
   PrintChar('\n');
 
   XSDT *xsdt = rsdp.xsdt_address;
+  assert(xsdt);
   PrintStringAndHex64("XSDT is at", xsdt);
   PrintString("  XSDT Signature: ");
   PrintStringWithSize(xsdt->signature, 4);
   PrintChar('\n');
 
-  NFIT *nfit = LookupNFITFromXSDT(xsdt);
-  assert(nfit);
-  PrintStringAndHex64("NFIT is at", nfit);
+  NFIT &nfit = LookupNFITFromXSDT(xsdt);
+  PrintStringAndHex64("NFIT is at", &nfit);
   PrintString("  NFIT Signature: ");
-  PrintStringWithSize(nfit->signature, 4);
+  PrintStringWithSize(nfit.signature, 4);
   PrintChar('\n');
 
-  return *nfit;
+  return nfit;
 }
 
 void PrintSPARange(NFIT::SPARange &spa_range) {
@@ -370,34 +240,16 @@ void PrintSPARange(NFIT::SPARange &spa_range) {
   PrintStringAndHex64("  Length", spa_range.spa_length);
 }
 
-void PrintNFITEntries(NFIT &nfit) {
+NFIT::SPARange &GetFirstSPARangeOfByteAddressablePMEM(NFIT &nfit) {
   for (auto &it : nfit) {
-    if (it.type != NFIT::Entry::kTypeSPARangeStructure) {
-      continue;
-    }
+    if (it.type != NFIT::Entry::kTypeSPARangeStructure) continue;
     NFIT::SPARange &spa_range = *reinterpret_cast<NFIT::SPARange *>(&it);
     if (IsEqualGUID(
             reinterpret_cast<GUID *>(&spa_range.address_range_type_guid),
-            &NFIT::SPARange::kByteAddressablePersistentMemory)) {
-      PrintSPARange(spa_range);
-      continue;
-    }
+            &NFIT::SPARange::kByteAddressablePersistentMemory))
+      return spa_range;
   }
-}
-
-NFIT::SPARange *GetFirstSPARangeOfByteAddressablePMEM(NFIT &nfit) {
-  for (auto &it : nfit) {
-    if (it.type != NFIT::Entry::kTypeSPARangeStructure) {
-      continue;
-    }
-    NFIT::SPARange &spa_range = *reinterpret_cast<NFIT::SPARange *>(&it);
-    if (IsEqualGUID(
-            reinterpret_cast<GUID *>(&spa_range.address_range_type_guid),
-            &NFIT::SPARange::kByteAddressablePersistentMemory)) {
-      return &spa_range;
-    }
-  }
-  return nullptr;
+  assert(false);
 }
 
 static inline void DoCLWB(volatile void *__p) {
@@ -406,7 +258,7 @@ static inline void DoCLWB(volatile void *__p) {
 
 void RunCommand(const char *input, NFIT &nfit) {
   if (strcmp(input, "write1") == 0) {
-    NFIT::SPARange &spa_range = *GetFirstSPARangeOfByteAddressablePMEM(nfit);
+    NFIT::SPARange &spa_range = GetFirstSPARangeOfByteAddressablePMEM(nfit);
     PrintString("First spa range:\n");
     PrintSPARange(spa_range);
     volatile uint64_t *p =
@@ -418,7 +270,7 @@ void RunCommand(const char *input, NFIT &nfit) {
     return;
   }
   if (strcmp(input, "write0") == 0) {
-    NFIT::SPARange &spa_range = *GetFirstSPARangeOfByteAddressablePMEM(nfit);
+    NFIT::SPARange &spa_range = GetFirstSPARangeOfByteAddressablePMEM(nfit);
     PrintString("First spa range:\n");
     PrintSPARange(spa_range);
     volatile uint64_t *p =
@@ -430,7 +282,7 @@ void RunCommand(const char *input, NFIT &nfit) {
     return;
   }
   if (strcmp(input, "clwb") == 0) {
-    NFIT::SPARange &spa_range = *GetFirstSPARangeOfByteAddressablePMEM(nfit);
+    NFIT::SPARange &spa_range = GetFirstSPARangeOfByteAddressablePMEM(nfit);
     PrintString("First spa range:\n");
     PrintSPARange(spa_range);
     volatile uint64_t *p =
@@ -442,7 +294,9 @@ void RunCommand(const char *input, NFIT &nfit) {
     return;
   }
   if (strcmp(input, "show spa") == 0) {
-    PrintNFITEntries(nfit);
+    NFIT::SPARange &spa_range = GetFirstSPARangeOfByteAddressablePMEM(nfit);
+    PrintString("First spa range:\n");
+    PrintSPARange(spa_range);
     return;
   }
   PrintString("Available commands:\n");
@@ -452,10 +306,9 @@ SystemTable *efi_system_table;
 void efi_main(Handle image_handle, SystemTable *system_table) {
   efi_system_table = system_table;
 
-  PrintString("Hello NVDIMM Playground with efi!\n");
+  PrintString("Hello NVDIMM Playground with UEFI!\n\n");
 
   NFIT &nfit = LookupNFIT(system_table);
-  PrintNFIT(nfit);
 
   constexpr int kKeyBufLen = 16;
   char cmd[kKeyBufLen];
