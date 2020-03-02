@@ -54,6 +54,16 @@ int strcmp(const char *s1, const char *s2) {
   return 0;
 }
 
+uint64_t strtouint64(const char *s) {
+  uint64_t v = 0;
+  while ('0' <= *s && *s <= '9') {
+    v *= 10;
+    v += *s - '0';
+    s++;
+  }
+  return v;
+}
+
 NFIT &LookupNFITFromXSDT(XSDT *xsdt) {
   const int kNumOfXSDTEntries =
       (xsdt->length - offsetof(XSDT, entry)) / sizeof(xsdt->entry[0]);
@@ -252,45 +262,31 @@ NFIT::SPARange &GetFirstSPARangeOfByteAddressablePMEM(NFIT &nfit) {
   assert(false);
 }
 
-static inline void DoCLWB(volatile void *__p) {
-  asm volatile("clwb %0" : "+m"(*(volatile char *)__p));
-}
-
 void RunCommand(const char *input, NFIT &nfit) {
-  if (strcmp(input, "write1") == 0) {
+  if (strncmp(input, "write ", 6) == 0) {
     NFIT::SPARange &spa_range = GetFirstSPARangeOfByteAddressablePMEM(nfit);
-    PrintString("First spa range:\n");
-    PrintSPARange(spa_range);
     volatile uint64_t *p =
         reinterpret_cast<volatile uint64_t *>(spa_range.spa_base);
-    PrintStringAndHex64("Read value before write", *p);
-    PrintStringAndHex64("Write 1 at", p);
-    *p = 1;
-    PrintStringAndHex64("Read value after write ", *p);
+    uint64_t v = strtouint64(input + 6);
+    PrintStringAndHex64("Write value     ", v);
+    PrintStringAndHex64("  to phys addr  ", p);
+    *p = v;
     return;
   }
-  if (strcmp(input, "write0") == 0) {
+  if (strcmp(input, "read") == 0) {
     NFIT::SPARange &spa_range = GetFirstSPARangeOfByteAddressablePMEM(nfit);
-    PrintString("First spa range:\n");
-    PrintSPARange(spa_range);
     volatile uint64_t *p =
         reinterpret_cast<volatile uint64_t *>(spa_range.spa_base);
-    PrintStringAndHex64("Read value before write", *p);
-    PrintStringAndHex64("Write 0 at", p);
-    *p = 0;
-    PrintStringAndHex64("Read value after write ", *p);
+    PrintStringAndHex64("Read value      ", *p);
+    PrintStringAndHex64("  from phys addr", p);
     return;
   }
   if (strcmp(input, "clwb") == 0) {
     NFIT::SPARange &spa_range = GetFirstSPARangeOfByteAddressablePMEM(nfit);
-    PrintString("First spa range:\n");
-    PrintSPARange(spa_range);
     volatile uint64_t *p =
         reinterpret_cast<volatile uint64_t *>(spa_range.spa_base);
-    PrintStringAndHex64("Read value before write", *p);
     PrintStringAndHex64("CLWB on", p);
-    DoCLWB(p);
-    PrintStringAndHex64("Read value after write ", *p);
+    asm volatile("clwb %0" : "+m"(*p));
     return;
   }
   if (strcmp(input, "show spa") == 0) {
@@ -305,6 +301,7 @@ void RunCommand(const char *input, NFIT &nfit) {
 SystemTable *efi_system_table;
 void efi_main(Handle image_handle, SystemTable *system_table) {
   efi_system_table = system_table;
+  efi_system_table->con_out->clear_screen(efi_system_table->con_out);
 
   PrintString("Hello NVDIMM Playground with UEFI!\n\n");
 
